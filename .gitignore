@@ -1,0 +1,23 @@
+# runtime state — never commit WARP identity / logs
+data-*/
+**/data-n*/
+*.log
+.env
+.env.*
+!.env.example
+
+# local overrides
+docker-compose.override.yml
+compose.override.yml
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# python
+__pycache__/
+*.pyc
+.venv/
