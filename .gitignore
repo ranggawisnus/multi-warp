@@ -1,6 +1,8 @@
 # runtime state — never commit WARP identity / logs
 data-*/
 **/data-n*/
+warp-pool.txt
+*_warp_pool.txt
 *.log
 .env
 .env.*
