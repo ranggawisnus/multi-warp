@@ -32,9 +32,19 @@ Single WARP (or single VPS IP) gets rate-limited fast when you open many session
 | Identity | **1 data volume per node** → separate WARP registration |
 | Protocol | SOCKS5 on host ports `40001…` |
 | Isolation | Default bind **`127.0.0.1` only** (not public) |
-| Ops | `generate` → `up` → `healthcheck` → `export-pool` |
+| Ops | **`./mw run`** (or `generate` → `up` → `healthcheck` → `export-pool`) |
 
 Used in production with **10 healthy exits** on a farm VPS.
+
+### Pool size expectations (read this)
+
+| Target size | Realistic outcome |
+|---|---|
+| **10–15 exits** | **Normal / recommended.** Most nodes reach `warp=on`; unique IPs often close to N (anycast may still reuse a few). |
+| **~20 exits** | **Hard.** Simultaneous registration from one host often leaves nodes stuck at `warp=off` (daemon hang / watchdog). Getting **20 unique** exit IPs needs serial recreate + long waits; Cloudflare anycast frequently overlaps. |
+| **30+** | Not practical on a single host for “all unique”. Prefer multiple hosts or accept heavy IP reuse. |
+
+`./mw run` will **recreate** bad nodes (FAIL, `warp≠on`, or **duplicate exit IP**) until every exit is unique or `MAX_ROUNDS` is hit. That does **not** guarantee Cloudflare hands out N distinct anycast addresses—especially past ~15.
 
 ---
 
@@ -50,18 +60,49 @@ Used in production with **10 healthy exits** on a farm VPS.
 
 ---
 
-## Quick start (10 exits)
+## Quick start (recommended: `mw`)
+
+One entrypoint for start / stop / status. On `run` it regenerates compose when `-n` changes, probes every port, and recreates bad nodes (including root-owned `data-n*` wipe via a helper container).
 
 ```bash
 git clone https://github.com/Micolaabdi/multi-warp.git
 cd multi-warp
-chmod +x scripts/*.sh
+chmod +x scripts/*.sh mw
 
-# generate compose + start + probe
+# 10 exits — typical sweet spot
+./mw run -n 10
+
+# status / stop
+./mw status -n 10
+./mw stop
+```
+
+```bash
+# 15 is usually still OK with patience
+./mw run -n 15 --max-rounds 12 --recreate-wait 90
+
+# 20 is hard: use small batches + long waits (may still land <20 unique)
+./mw run -n 20 --max-rounds 12 --recreate-batch 2 --recreate-wait 90
+```
+
+| Command | Meaning |
+|---|---|
+| `./mw run [-n N]` | Generate/scale compose → `up` → probe → recreate until unique + `warp=on` → write `warp-pool.txt` |
+| `./mw stop` | `docker compose down` |
+| `./mw status [-n N]` | List containers + probe ports |
+| `./mw restart [-n N]` | stop then run |
+
+Useful env / flags: `COUNT` / `-n`, `BASE_PORT` / `-p`, `--bind`, `--max-rounds`, `--recreate-batch`, `--recreate-wait`, `--initial-wait`.
+
+Symlink: `./mw` → `scripts/mw.sh`.
+
+### Classic path (`up.sh`)
+
+```bash
 COUNT=10 ./scripts/up.sh
 ```
 
-What `up.sh` does:
+What `up.sh` does (one-shot, **no** unique-IP recreate loop):
 
 1. Generates `docker-compose.yml` if missing  
 2. Creates `data-n1…data-nN`  
@@ -91,7 +132,8 @@ ok=10 fail=0 unique_exit_ips=8 / 10
 ```
 
 > Unique IPs can be **&lt; N** (Cloudflare may reuse some anycast exits).  
-> **All N sharing one IP** after several minutes → problem (see troubleshooting).
+> **All N sharing one IP** after several minutes → problem (see troubleshooting).  
+> Prefer **`./mw run`** when you need automated recreate until unique.
 
 ---
 
@@ -145,9 +187,13 @@ More examples: [`examples/`](examples/).
 ### Fewer / more nodes
 
 ```bash
+./mw run -n 5
+# or classic:
 python3 scripts/generate-compose.py -n 5 -o docker-compose.yml
 COUNT=5 ./scripts/up.sh
 ```
+
+`mw run -n N` **regenerates** `docker-compose.yml` when N / base-port / bind differ from the current file (so scaling 10 → 15 actually starts 15 services).
 
 ### Remote farm host needs to reach WARP on another machine
 
@@ -175,9 +221,13 @@ Export pool with extra host:
 ### Stop / wipe
 
 ```bash
-./scripts/down.sh
-# wipe WARP identities (will re-register on next up):
-# rm -rf data-n*
+./mw stop
+# or: ./scripts/down.sh
+
+# wipe WARP identities (will re-register on next up).
+# Files under data-n* are often root-owned (container); plain rm may fail:
+#   docker run --rm -v "$PWD/data-n3:/wipe" --user 0:0 alpine sh -c 'rm -rf /wipe/*'
+# ./mw run already wipes bad nodes this way during recreate.
 ```
 
 ---
@@ -186,9 +236,11 @@ Export pool with extra host:
 
 ```text
 multi-warp/
+├── mw                        # symlink → scripts/mw.sh
 ├── scripts/
+│   ├── mw.sh                 # run | stop | status | restart (+ unique-IP loop)
 │   ├── generate-compose.py   # build docker-compose.yml for N nodes
-│   ├── up.sh                 # generate + start + healthcheck
+│   ├── up.sh                 # generate + start + healthcheck (no recreate loop)
 │   ├── down.sh
 │   ├── healthcheck.sh        # per-port exit IP (+ optional warp=on)
 │   └── export-pool.sh        # write socks URL list
@@ -203,7 +255,7 @@ multi-warp/
 └── README.md
 ```
 
-`data-n*` is **gitignored** (contains WARP device state).
+`data-n*` and `warp-pool.txt` are **gitignored** (runtime state / local pool).
 
 ---
 
@@ -224,10 +276,12 @@ Quick hits:
 
 | Symptom | Fix |
 |---|---|
-| ` /dev/net/tun` missing | `sudo modprobe tun` |
+| `/dev/net/tun` missing | `sudo modprobe tun` |
 | All ports FAIL | `docker compose logs warp-n1` — wait 1–2 min first boot |
-| All OK but **same IP** | delete one `data-nX`, recreate that service; or restart node |
-| `healthy` in docker but curl FAIL | healthcheck vs host path — re-run `./scripts/healthcheck.sh` |
+| All OK but **same IP** | `./mw run` recreate loop, or wipe one `data-nX` + recreate that service |
+| Many `warp=off` after large `-n` | Start fewer nodes (10–15); recreate **serially** (`--recreate-batch 1`–`2`, longer `--recreate-wait`) |
+| `rm: Operation not permitted` on `data-n*` | Root-owned files from container — use `./mw` wipe or alpine root mount (see Stop / wipe) |
+| `healthy` in docker but curl FAIL | healthcheck vs host path — re-run `./scripts/healthcheck.sh` or `./mw status` |
 | Permission / NET_ADMIN | run Docker as root or proper userns; avoid rootless without TUN |
 
 ---

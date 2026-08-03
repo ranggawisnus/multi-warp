@@ -44,21 +44,38 @@ docker compose up -d
 
 ## 4. All nodes healthy but **same public IP**
 
-Mild: Cloudflare anycast can overlap — 10 nodes → ~6–9 unique is OK.
+Mild: Cloudflare anycast can overlap — 10 nodes → ~6–9 unique is OK.  
+**10–15** is the realistic band for a healthy multi-exit pool; **~20 all-unique is hard** (anycast reuse + registration load).
 
 Bad: 10/10 identical forever.
 
-Try:
+Prefer:
 
 ```bash
-docker compose restart warp-n3
-# or hard reset one identity:
+./mw run -n 10   # recreates FAIL / warp≠on / duplicate-IP nodes
+```
+
+Manual one-node reset (host `rm` may fail if files are root-owned):
+
+```bash
 docker compose stop warp-n3
-rm -rf data-n3
-mkdir data-n3
+docker compose rm -f warp-n3
+docker run --rm -v "$PWD/data-n3:/wipe" --user 0:0 alpine sh -c 'rm -rf /wipe/* /wipe/.[!.]* /wipe/..?* 2>/dev/null; exit 0'
+mkdir -p data-n3
 docker compose up -d warp-n3
 ./scripts/healthcheck.sh -n 10
+# or: ./mw status -n 10
 ```
+
+## 4b. Many nodes stuck `warp=off` after a large start
+
+Starting **many** WARP clients at once on one host often leaves daemons hung (`Watchdog is shutting down an overly hung daemon` in logs). SOCKS still answers with the **host** IP and `warp=off`.
+
+Mitigations:
+
+- Prefer **10–15** nodes, not 30–50 on day one  
+- Recreate **serially or tiny batches**: `./mw run -n 20 --recreate-batch 1 --recreate-wait 90`  
+- Do not wipe `data-n*` while the container is still running (breaks some Docker Desktop/WSL bind mounts)
 
 ## 5. Docker says healthy, host curl fails
 

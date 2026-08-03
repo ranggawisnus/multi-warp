@@ -20,18 +20,40 @@ multi-warp = **N container Docker**, tiap container:
 - ada `/dev/net/tun`  
 - container boleh `NET_ADMIN`
 
-## Pasang cepat (10 exit)
+## Ukuran pool (penting)
+
+| Target | Realistis |
+|---|---|
+| **10–15 exit** | **Normal / disarankan.** Biasanya stabil, unique IP mendekati N. |
+| **~20 exit** | **Sulit.** Registrasi massal sering `warp=off` / hang; IP unik 20 butuh recreate serial + sabar; anycast Cloudflare sering overlap. |
+| **30+** | Tidak praktis di 1 host kalau target “semua IP beda”. |
+
+## Pasang cepat (disarankan: `mw`)
 
 ```bash
 git clone https://github.com/Micolaabdi/multi-warp.git
 cd multi-warp
-chmod +x scripts/*.sh
-COUNT=10 ./scripts/up.sh
+chmod +x scripts/*.sh mw
+
+./mw run -n 10          # sweet spot
+./mw status -n 10
+./mw stop
 ```
 
-Cek:
+`./mw run` regenerate compose jika `-n` berubah, probe tiap port, recreate node jelek (FAIL / `warp≠on` / IP duplikat) sampai unique atau habis round.
 
 ```bash
+# 15 biasanya masih OK
+./mw run -n 15 --max-rounds 12 --recreate-wait 90
+
+# 20 sulit — batch kecil
+./mw run -n 20 --recreate-batch 2 --recreate-wait 90
+```
+
+Klasik (tanpa loop unique-IP):
+
+```bash
+COUNT=10 ./scripts/up.sh
 ./scripts/healthcheck.sh -n 10 --trace
 cat warp-pool.txt
 ```
@@ -52,6 +74,8 @@ socks5://127.0.0.1:40002
 ## Jumlah node beda
 
 ```bash
+./mw run -n 5
+# atau:
 python3 scripts/generate-compose.py -n 5 -o docker-compose.yml
 COUNT=5 ./scripts/up.sh
 ```
@@ -76,21 +100,19 @@ Lalu **firewall** hanya izinkan IP farm kamu ke port `40001–4000N`.
 ## Stop
 
 ```bash
-./scripts/down.sh
+./mw stop
+# atau: ./scripts/down.sh
 ```
 
-Hapus identitas WARP (daftar ulang nanti):
-
-```bash
-rm -rf data-n*
-```
+Hapus identitas WARP (daftar ulang nanti). Isi `data-n*` sering milik root (dari container) — `rm -rf` di host bisa gagal; `./mw run` sudah wipe lewat container helper saat recreate.
 
 ## Masalah umum
 
 | Gejala | Arti |
 |---|---|
 | Semua port FAIL | WARP belum ready / TUN rusak → cek log container |
-| Semua OK tapi IP sama | Identitas belum beda / anycast sama → tunggu atau recreate 1 node |
+| Semua OK tapi IP sama | Identitas belum beda / anycast sama → `./mw run` atau recreate 1 node |
+| Banyak `warp=off` di `-n` besar | Turunkan ke 10–15; recreate serial (`--recreate-batch 1`) |
 | `tun` missing | `sudo modprobe tun` |
 
 Detail: [troubleshooting.md](troubleshooting.md)
